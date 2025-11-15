@@ -1,9 +1,10 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, List
 from datetime import datetime, timezone
+import requests
 
 # Database helpers
 from database import create_document, get_documents, db
@@ -75,6 +76,45 @@ async def list_contact_messages(limit: int = 10):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/image")
+def proxy_image(src: str = Query(..., description="Absolute image URL to proxy")):
+    """
+    Simple image proxy to bypass hotlink/CORS restrictions from hosts like Google Drive/Photos.
+    Usage: /api/image?src=<encoded-url>
+    """
+    try:
+        # Basic allowlist check to prevent SSRF abuse
+        if not (src.startswith("https://") or src.startswith("http://")):
+            raise HTTPException(status_code=400, detail="Invalid URL")
+
+        # Fetch with a browser-like UA and no referrer
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            "Referer": "",
+            "Origin": "",
+        }
+        # stream=False to read content at once (small avatars). Set timeout.
+        resp = requests.get(src, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail=f"Upstream failed: {resp.status_code}")
+
+        content_type = resp.headers.get("Content-Type", "image/jpeg")
+        # Cache for a day to reduce repeated fetches
+        cache_headers = {
+            "Cache-Control": "public, max-age=86400",
+            "Content-Type": content_type,
+            "X-Image-Proxy": "1",
+        }
+        return Response(content=resp.content, media_type=content_type, headers=cache_headers)
+    except HTTPException:
+        raise
+    except requests.Timeout:
+        raise HTTPException(status_code=504, detail="Image fetch timed out")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
 
 
 @app.get("/test")
